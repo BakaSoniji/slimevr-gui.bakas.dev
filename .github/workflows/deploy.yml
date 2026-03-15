@@ -81,9 +81,14 @@ jobs:
       matrix:
         version: ${{ fromJson(needs.discover.outputs.versions) }}
     continue-on-error: true
+    env:
+      DEPLOY_DIR: deploy-repo
+      SERVER_DIR: SlimeVR-Server
     steps:
       - name: Checkout deployment repo
         uses: actions/checkout@v6
+        with:
+          path: deploy-repo
 
       - name: Checkout SlimeVR-Server at v${{ matrix.version }}
         uses: actions/checkout@v6
@@ -117,11 +122,13 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Install Playwright
+        working-directory: deploy-repo
         run: bun install && bunx playwright install --with-deps chromium
 
       # --- Build GUI ---
       - name: Patch source for deployment
-        run: bun scripts/patch-for-deploy.ts --gui-root SlimeVR-Server/gui --base-path "/${{ matrix.version }}/"
+        working-directory: deploy-repo
+        run: bun scripts/patch-for-deploy.ts --gui-root ../SlimeVR-Server/gui --base-path "/${{ matrix.version }}/"
 
       - name: Install dependencies
         working-directory: SlimeVR-Server
@@ -136,7 +143,6 @@ jobs:
         env:
           BASE_PATH: /${{ matrix.version }}/
         run: |
-          # Use vite directly for electron-vite projects (web deployment only)
           if [ -f electron.vite.config.ts ]; then
             npx vite build
           else
@@ -144,7 +150,8 @@ jobs:
           fi
 
       - name: Verify paths
-        run: bun scripts/verify-paths.ts SlimeVR-Server/gui/dist "/${{ matrix.version }}/"
+        working-directory: deploy-repo
+        run: bun scripts/verify-paths.ts ../SlimeVR-Server/gui/dist "/${{ matrix.version }}/"
 
       # --- Build server ---
       - name: Build SlimeVR server
@@ -163,7 +170,8 @@ jobs:
           java -jar SlimeVR-Server/server/build/libs/slimevr*.jar &
           SERVER_PID=$!
 
-          bun scripts/serve.ts --dir serve-root --port 8765 &
+          cd deploy-repo
+          bun scripts/serve.ts --dir ../serve-root --port 8765 &
           SERVE_PID=$!
 
           timeout 30 bash -c 'until curl -sf http://localhost:8765/${{ matrix.version }}/ > /dev/null 2>&1; do sleep 1; done'
