@@ -1,0 +1,10 @@
+@use "@picocss/pico/scss/pico" with (
+  $theme-color: "purple"
+);
+
+button,
+[type="submit"],
+[type="button"],
+[role="button"] {
+  --pico-form-element-spacing-vertical: 0.25rem;
+}

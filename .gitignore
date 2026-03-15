@@ -1,0 +1,29 @@
+# dependencies
+node_modules
+
+# astro
+dist
+.astro
+
+# generated data (fetched from S3 in CI, generated locally for dev)
+versions.json
+schema-fingerprints.json
+protocol-exploration.json
+
+# local GUI builds
+serve-root
+
+# test artifacts
+test-results
+
+# dotenv
+.env
+.env.local
+.env.*.local
+
+# caches
+.cache
+*.tsbuildinfo
+
+# os
+.DS_Store

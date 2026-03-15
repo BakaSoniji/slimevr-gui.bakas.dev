@@ -1,0 +1,336 @@
+name: Deploy
+
+on:
+  repository_dispatch:
+    types: [GitRepository/slimevr-server]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Specific version to build (e.g., 0.18.2). Leave empty to auto-discover.'
+        required: false
+        type: string
+      include-prereleases:
+        description: 'Include prerelease versions (e.g., 0.16.3-rc.1)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  SLIMEVR_REPO: SlimeVR/SlimeVR-Server
+  MIN_VERSION: '0.13.0'
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      versions: ${{ steps.diff.outputs.versions }}
+    steps:
+      - name: Checkout deployment repo
+        uses: actions/checkout@v6
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Fetch deployed versions from S3
+        env:
+          S3_BUCKET: ${{ vars.TF_VAR_S3_BUCKET_NAME }}
+        run: |
+          if aws s3 cp "s3://$S3_BUCKET/versions.json" versions.json 2>/dev/null; then
+            echo "Found existing versions.json"
+            cat versions.json
+          else
+            echo "No versions.json found, starting fresh"
+            echo '[]' > versions.json
+          fi
+
+      - name: Fetch upstream releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/${{ env.SLIMEVR_REPO }}/releases --paginate --jq '.[].tag_name' | \
+            sed 's/^v//' | sort -V > all_releases.txt
+          echo "All releases:"
+          cat all_releases.txt
+
+      - name: Discover versions to build
+        id: diff
+        run: |
+          bun scripts/ci-discover-versions.ts \
+            --deployed versions.json \
+            --releases all_releases.txt \
+            --min-version "${{ env.MIN_VERSION }}" \
+            ${{ inputs.version && format('--override {0}', inputs.version) || '' }} \
+            ${{ inputs.include-prereleases && '--include-prereleases' || '' }}
+
+  build:
+    needs: discover
+    if: needs.discover.outputs.versions != '[]' && needs.discover.outputs.versions != ''
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJson(needs.discover.outputs.versions) }}
+    continue-on-error: true
+    steps:
+      - name: Checkout deployment repo
+        uses: actions/checkout@v6
+
+      - name: Checkout SlimeVR-Server at v${{ matrix.version }}
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.SLIMEVR_REPO }}
+          ref: v${{ matrix.version }}
+          submodules: recursive
+          path: SlimeVR-Server
+
+      # --- Setup ---
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Install Playwright
+        run: bun install && bunx playwright install --with-deps chromium
+
+      # --- Build GUI ---
+      - name: Patch source for deployment
+        run: bun scripts/patch-for-deploy.ts --gui-root SlimeVR-Server/gui --base-path "/${{ matrix.version }}/"
+
+      - name: Install dependencies
+        working-directory: SlimeVR-Server
+        run: pnpm install --frozen-lockfile || pnpm install
+
+      - name: Build solarxr-protocol
+        working-directory: SlimeVR-Server
+        run: pnpm run update-solarxr
+
+      - name: Build GUI
+        working-directory: SlimeVR-Server/gui
+        env:
+          BASE_PATH: /${{ matrix.version }}/
+        run: |
+          # Use vite directly for electron-vite projects (web deployment only)
+          if [ -f electron.vite.config.ts ]; then
+            npx vite build
+          else
+            pnpm run build
+          fi
+
+      - name: Verify paths
+        run: bun scripts/verify-paths.ts SlimeVR-Server/gui/dist "/${{ matrix.version }}/"
+
+      # --- Build server ---
+      - name: Build SlimeVR server
+        working-directory: SlimeVR-Server
+        run: ./gradlew shadowJar
+
+      - name: Run smoke tests
+        id: smoke
+        env:
+          TEST_VERSION: ${{ matrix.version }}
+          SERVE_PORT: '8765'
+        run: |
+          mkdir -p serve-root
+          ln -s "$(pwd)/SlimeVR-Server/gui/dist" "serve-root/${{ matrix.version }}"
+
+          java -jar SlimeVR-Server/server/build/libs/slimevr*.jar &
+          SERVER_PID=$!
+
+          bun scripts/serve.ts --dir serve-root --port 8765 &
+          SERVE_PID=$!
+
+          timeout 30 bash -c 'until curl -sf http://localhost:8765/${{ matrix.version }}/ > /dev/null 2>&1; do sleep 1; done'
+          timeout 30 bash -c 'until nc -z localhost 21110 2>/dev/null; do sleep 1; done' || true
+
+          bunx playwright test
+
+          kill $SERVE_PID $SERVER_PID 2>/dev/null || true
+
+      # --- Upload GUI dist to S3 (version-scoped, no conflicts) ---
+      - name: Configure AWS credentials
+        if: steps.smoke.outcome == 'success'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Upload to S3
+        if: steps.smoke.outcome == 'success'
+        env:
+          S3_BUCKET: ${{ vars.TF_VAR_S3_BUCKET_NAME }}
+          VERSION: ${{ matrix.version }}
+        run: |
+          aws s3 sync "SlimeVR-Server/gui/dist/assets/" "s3://$S3_BUCKET/$VERSION/assets/" \
+            --cache-control "public, max-age=31536000, immutable"
+
+          aws s3 sync "SlimeVR-Server/gui/dist/" "s3://$S3_BUCKET/$VERSION/" \
+            --exclude "assets/*" \
+            --cache-control "public, max-age=86400"
+
+      # --- Signal success via artifact name (consumed by update-index) ---
+      - name: Upload build marker
+        if: steps.smoke.outcome == 'success'
+        run: echo ok > .build-marker
+      - uses: actions/upload-artifact@v4
+        if: steps.smoke.outcome == 'success'
+        with:
+          name: build-result-${{ matrix.version }}
+          path: .build-marker
+          retention-days: 1
+
+  update-index:
+    needs: [discover, build]
+    if: always() && needs.build.result != 'cancelled'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout deployment repo
+        uses: actions/checkout@v6
+
+      # fetch-depth: 0 with submodules: recursive fetches full history for
+      # both the main repo and submodules — needed by explore-protocol.ts
+      # to git-archive historical solarxr-protocol commits
+      - name: Checkout SlimeVR-Server (for schema fingerprints)
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.SLIMEVR_REPO }}
+          fetch-depth: 0
+          submodules: recursive
+          path: SlimeVR-Server
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install flatbuffers
+        run: sudo apt-get install -y flatbuffers-compiler
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # --- Collect successful builds ---
+      # Each successful build job uploads an artifact named build-result-{version}.
+      # List matching artifacts to discover which versions succeeded.
+      - name: Identify built versions
+        id: built
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          versions=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" \
+            --jq '[.artifacts[].name | select(startswith("build-result-")) | ltrimstr("build-result-")]')
+          echo "versions=$versions" >> "$GITHUB_OUTPUT"
+          echo "Built versions: $versions"
+
+      # --- Update versions.json (once, no race) ---
+      - name: Update versions.json
+        env:
+          S3_BUCKET: ${{ vars.TF_VAR_S3_BUCKET_NAME }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if aws s3 cp "s3://$S3_BUCKET/versions.json" versions.json 2>/dev/null; then
+            echo "Fetched existing versions.json"
+          else
+            echo '[]' > versions.json
+          fi
+
+          attempted='${{ needs.discover.outputs.versions }}'
+          succeeded='${{ steps.built.outputs.versions }}'
+
+          # Record successful builds
+          for version in $(echo "$succeeded" | jq -r '.[]'); do
+            release=$(gh api "repos/${{ env.SLIMEVR_REPO }}/releases/tags/v${version}" 2>/dev/null || echo '{}')
+            url=$(echo "$release" | jq -r '.html_url // empty')
+            date=$(echo "$release" | jq -r '.published_at // empty')
+
+            bun scripts/ci-update-versions-json.ts versions.json "$version" \
+              --status ok \
+              ${url:+--release-url "$url"} \
+              ${date:+--date "$date"}
+          done
+
+          # Record failed builds (attempted minus succeeded)
+          for version in $(echo "$attempted" | jq -r '.[]'); do
+            if ! echo "$succeeded" | jq -e --arg v "$version" 'index($v) != null' > /dev/null 2>&1; then
+              bun scripts/ci-update-versions-json.ts versions.json "$version" \
+                --status failed --fail-reason "build or smoke test failed"
+            fi
+          done
+
+          aws s3 cp versions.json "s3://$S3_BUCKET/versions.json" \
+            --cache-control "no-cache"
+
+      # --- Update schema fingerprints (once, no race) ---
+      - name: Update schema fingerprints
+        env:
+          S3_BUCKET: ${{ vars.TF_VAR_S3_BUCKET_NAME }}
+        run: |
+          bun scripts/explore-protocol.ts \
+            --server-repo SlimeVR-Server \
+            --output protocol-exploration.json
+
+          bun scripts/extract-schema-fingerprints.ts \
+            --input protocol-exploration.json \
+            --output schema-fingerprints.json
+
+          aws s3 cp schema-fingerprints.json "s3://$S3_BUCKET/schema-fingerprints.json" \
+            --cache-control "no-cache"
+
+      # --- Build index page ---
+      # versions.json and schema-fingerprints.json are already local from
+      # the update steps above. Fetch from S3 only if missing (e.g. no
+      # versions were built so the update step was skipped).
+      - name: Ensure data files exist
+        env:
+          S3_BUCKET: ${{ vars.TF_VAR_S3_BUCKET_NAME }}
+        run: |
+          [ -f versions.json ] || aws s3 cp "s3://$S3_BUCKET/versions.json" versions.json 2>/dev/null || echo '[]' > versions.json
+          [ -f schema-fingerprints.json ] || aws s3 cp "s3://$S3_BUCKET/schema-fingerprints.json" schema-fingerprints.json 2>/dev/null || echo '{}' > schema-fingerprints.json
+
+      - name: Build index page
+        run: bun run build
+
+      - name: Upload index page
+        env:
+          S3_BUCKET: ${{ vars.TF_VAR_S3_BUCKET_NAME }}
+        run: |
+          aws s3 sync dist/_astro/ "s3://$S3_BUCKET/_astro/" \
+            --cache-control "public, max-age=31536000, immutable"
+
+          aws s3 cp dist/index.html "s3://$S3_BUCKET/index.html" \
+            --cache-control "public, max-age=300"
+
+      - name: Invalidate CloudFront
+        if: vars.CLOUDFRONT_DISTRIBUTION_ID != ''
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id ${{ vars.CLOUDFRONT_DISTRIBUTION_ID }} \
+            --paths "/index.html" "/_astro/*"

@@ -1,0 +1,36 @@
+# Configuration for the fingerprint extraction script.
+#
+# The extraction script reads exploration data (from explore-protocol.ts),
+# auto-selects measurements that create version boundaries, and outputs
+# a compact fingerprint file for the client probe.
+#
+# Skip entries remove measurements from selection entirely. Can be:
+#   - A measurement name (e.g. "SettingsResponse.some_field")
+#     resolved to IDs via the exploration data. Any historical name works,
+#     even if the field was renamed in a later version.
+#   - An ID tuple [requestType, responseType, ...path] for direct matching.
+#
+# Note: field renames are invisible on the wire (FlatBuffers vtables only
+# contain offsets, not names). The extraction script already deduplicates
+# measurements by wire identity, keeping the latest name. Use skip only
+# for measurements you genuinely don't want, not for deduplication.
+#
+# Match mode controls how vtable slot counts are compared:
+#   - "upper-bound": server may return fewer slots than the schema defines
+#     (e.g. conditional field population). The observed count is treated
+#     as <= the schema value. This is the safe default.
+#   - "exact": server always populates all fields, so the observed count
+#     must match the schema exactly. Only use when the server code is known
+#     to always write every field (e.g. SettingsResponse uses
+#     createSettingsResponse() with all arguments).
+
+min-version: "0.2.0"
+
+# Default match mode for all probes. Individual probes can override.
+match: "upper-bound"
+
+# Per-probe match mode overrides. Keys are response names.
+match-overrides:
+  SettingsResponse: "exact"
+
+skip: []

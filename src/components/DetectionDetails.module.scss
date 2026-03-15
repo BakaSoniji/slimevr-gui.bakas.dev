@@ -1,0 +1,119 @@
+@use "@picocss/pico/scss/colors" as c;
+
+.dialog {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+
+  > header {
+    display: flex;
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+  }
+  > div {
+    flex: 1;
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+}
+
+.legend {
+  font-size: 0.75rem;
+  width: auto;
+
+  td {
+    padding: 0.15rem 0.5rem;
+  }
+}
+
+.matrix {
+  font-family: var(--pico-font-family-monospace);
+  font-size: 0.6rem;
+
+  [data-tooltip] {
+    border-bottom: none;
+  }
+
+  th,
+  td {
+    text-align: center;
+    padding: 0.25rem 0.125rem;
+    white-space: nowrap;
+  }
+
+  th:first-child,
+  td:first-child {
+    text-align: left;
+  }
+
+  // Light mode (default)
+  $stripe: c.$zinc-100;
+
+  tbody tr:nth-child(odd) td {
+    background-color: $stripe;
+  }
+
+  .rowMatch td {
+    background-color: c.$green-50;
+  }
+
+  .rowMatch:nth-child(odd) td {
+    background-color: color-mix(in oklch, c.$green-50, $stripe);
+  }
+
+  .rowFail td {
+    background-color: c.$red-50;
+  }
+
+  .rowFail:nth-child(odd) td {
+    background-color: color-mix(in oklch, c.$red-50, $stripe);
+  }
+
+  // Dark mode
+  :global([data-theme="dark"]) & {
+    $stripe-dark: c.$zinc-800;
+
+    tbody tr:nth-child(odd) td {
+      background-color: $stripe-dark;
+    }
+
+    .rowMatch td {
+      background-color: c.$green-950;
+    }
+
+    .rowMatch:nth-child(odd) td {
+      background-color: color-mix(in oklch, c.$green-950, $stripe-dark);
+    }
+
+    .rowFail td {
+      background-color: c.$red-950;
+    }
+
+    .rowFail:nth-child(odd) td {
+      background-color: color-mix(in oklch, c.$red-950, $stripe-dark);
+    }
+  }
+}
+
+.cellFail {
+  font-weight: bold;
+  color: c.$red-700;
+
+  :global([data-theme="dark"]) & {
+    color: c.$red-300;
+  }
+}
+
+.cellExact {
+  font-weight: bold;
+  color: c.$green-700;
+
+  :global([data-theme="dark"]) & {
+    color: c.$green-300;
+  }
+}
+
+.cellSkip {
+  color: var(--pico-muted-color);
+}
