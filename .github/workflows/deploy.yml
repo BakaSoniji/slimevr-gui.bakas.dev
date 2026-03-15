@@ -104,6 +104,8 @@ jobs:
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
+        with:
+          version: 10
 
       - name: Setup Java
         uses: actions/setup-java@v5
