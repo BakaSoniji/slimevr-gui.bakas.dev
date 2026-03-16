@@ -79,24 +79,13 @@ jobs:
       - name: Checkout deployment repo
         uses: actions/checkout@v6
 
-      - name: Checkout SlimeVR-Server
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ env.SLIMEVR_REPO }}
-          fetch-depth: 0
-          submodules: recursive
-          path: SlimeVR-Server
-
-      # explore-protocol.ts needs full submodule history to git-archive
-      # historical commits; actions/checkout only fetches the HEAD commit
-      # explore-protocol.ts needs all historical submodule commits.
-      # actions/checkout only fetches HEAD; fetch all branches + tags.
-      - name: Fetch full submodule history
+      # Clone both repos with full history. Can't use actions/checkout for
+      # submodules because it creates shallow clones that miss historical
+      # commits needed by explore-protocol.ts for git-archive.
+      - name: Clone SlimeVR-Server
         run: |
-          cd SlimeVR-Server/solarxr-protocol
-          git fetch --unshallow 2>/dev/null || true
-          git fetch origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'
-          echo "Total commits: $(git rev-list --all --count)"
+          git clone https://github.com/${{ env.SLIMEVR_REPO }}.git SlimeVR-Server
+          git clone https://github.com/SlimeVR/SolarXR-Protocol.git SlimeVR-Server/solarxr-protocol
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
