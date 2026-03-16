@@ -72,6 +72,46 @@ jobs:
             ${{ inputs.version && format('--override {0}', inputs.version) || '' }} \
             ${{ inputs.include-prereleases && '--include-prereleases' || '' }}
 
+  # Generate schema fingerprints from git history (parallel with builds).
+  fingerprints:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout deployment repo
+        uses: actions/checkout@v6
+
+      - name: Checkout SlimeVR-Server
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.SLIMEVR_REPO }}
+          fetch-depth: 0
+          submodules: recursive
+          path: SlimeVR-Server
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install flatbuffers
+        run: sudo apt-get install -y flatbuffers-compiler
+
+      - name: Generate fingerprints
+        run: |
+          bun scripts/explore-protocol.ts \
+            --server-repo SlimeVR-Server \
+            --output protocol-exploration.json
+
+          bun scripts/extract-schema-fingerprints.ts \
+            --input protocol-exploration.json \
+            --output schema-fingerprints.json
+
+      - name: Upload fingerprints
+        uses: actions/upload-artifact@v4
+        with:
+          name: schema-fingerprints
+          path: schema-fingerprints.json
+          retention-days: 1
+
+  # Build each version in parallel. Only builds the GUI — no server, no tests.
+  # Uploads the dist as an artifact for the test + deploy jobs.
   build:
     needs: discover
     if: needs.discover.outputs.versions != '[]' && needs.discover.outputs.versions != ''
@@ -81,9 +121,6 @@ jobs:
       matrix:
         version: ${{ fromJson(needs.discover.outputs.versions) }}
     continue-on-error: true
-    env:
-      DEPLOY_DIR: deploy-repo
-      SERVER_DIR: SlimeVR-Server
     steps:
       - name: Checkout deployment repo
         uses: actions/checkout@v6
@@ -98,7 +135,6 @@ jobs:
           submodules: recursive
           path: SlimeVR-Server
 
-      # --- Setup ---
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
 
@@ -112,17 +148,10 @@ jobs:
         with:
           version: 10
 
-      - name: Setup Java
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Install Playwright
+      - name: Install deployment repo deps
         working-directory: deploy-repo
-        run: bun install && bunx playwright install --with-deps chromium
+        run: bun install
 
-      # --- Build GUI ---
       - name: Patch source for deployment
         working-directory: deploy-repo
         run: bun scripts/patch-for-deploy.ts --gui-root ../SlimeVR-Server/gui --base-path "/${{ matrix.version }}/"
@@ -150,91 +179,89 @@ jobs:
         working-directory: deploy-repo
         run: bun scripts/verify-paths.ts ../SlimeVR-Server/gui/dist "/${{ matrix.version }}/"
 
-      # --- Download server JAR from release ---
-      - name: Download server JAR
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ matrix.version }}
-        run: |
-          gh release download "v${VERSION}" \
-            --repo ${{ env.SLIMEVR_REPO }} \
-            --pattern "slimevr.jar" \
-            --dir .
-
-      - name: Run smoke tests
-        id: smoke
-        env:
-          TEST_VERSION: ${{ matrix.version }}
-          SERVE_PORT: '8765'
-        run: |
-          mkdir -p serve-root
-          ln -s "$(pwd)/SlimeVR-Server/gui/dist" "serve-root/${{ matrix.version }}"
-          echo '{"probes":[],"versions":{}}' > serve-root/schema-fingerprints.json
-
-          java -jar slimevr.jar &
-          SERVER_PID=$!
-
-          cd deploy-repo
-          bun scripts/serve.ts --dir ../serve-root --port 8765 &
-          SERVE_PID=$!
-
-          timeout 30 bash -c 'until curl -sf http://localhost:8765/${{ matrix.version }}/ > /dev/null 2>&1; do sleep 1; done'
-          timeout 30 bash -c 'until nc -z localhost 21110 2>/dev/null; do sleep 1; done' || true
-
-          bunx playwright test
-
-          kill $SERVE_PID $SERVER_PID 2>/dev/null || true
-
-      # --- Upload GUI dist to S3 (version-scoped, no conflicts) ---
-      - name: Configure AWS credentials
-        if: steps.smoke.outcome == 'success'
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Upload GUI dist
+        uses: actions/upload-artifact@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
-
-      - name: Upload to S3
-        if: steps.smoke.outcome == 'success'
-        env:
-          S3_BUCKET: ${{ vars.TF_VAR_S3_BUCKET_NAME }}
-          VERSION: ${{ matrix.version }}
-        run: |
-          aws s3 sync "SlimeVR-Server/gui/dist/assets/" "s3://$S3_BUCKET/$VERSION/assets/" \
-            --cache-control "public, max-age=31536000, immutable"
-
-          aws s3 sync "SlimeVR-Server/gui/dist/" "s3://$S3_BUCKET/$VERSION/" \
-            --exclude "assets/*" \
-            --cache-control "public, max-age=86400"
-
-      # --- Signal success via artifact name (consumed by update-index) ---
-      - name: Upload build marker
-        if: steps.smoke.outcome == 'success'
-        run: echo ok > .build-marker
-      - uses: actions/upload-artifact@v4
-        if: steps.smoke.outcome == 'success'
-        with:
-          name: build-result-${{ matrix.version }}
-          path: .build-marker
+          name: gui-dist-${{ matrix.version }}
+          path: SlimeVR-Server/gui/dist
           retention-days: 1
 
-  update-index:
-    needs: [discover, build]
+  # Run smoke tests against all built versions at once.
+  test:
+    needs: [discover, build, fingerprints]
     if: always() && needs.build.result != 'cancelled'
     runs-on: ubuntu-latest
+    outputs:
+      versions: ${{ steps.tested.outputs.versions }}
     steps:
       - name: Checkout deployment repo
         uses: actions/checkout@v6
 
-      # fetch-depth: 0 with submodules: recursive fetches full history for
-      # both the main repo and submodules — needed by explore-protocol.ts
-      # to git-archive historical solarxr-protocol commits
-      - name: Checkout SlimeVR-Server (for schema fingerprints)
-        uses: actions/checkout@v6
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install && bunx playwright install --with-deps chromium
+
+      - name: Download all GUI dists
+        uses: actions/download-artifact@v4
         with:
-          repository: ${{ env.SLIMEVR_REPO }}
-          fetch-depth: 0
-          submodules: recursive
-          path: SlimeVR-Server
+          pattern: gui-dist-*
+          path: serve-root
+
+      - name: Download fingerprints
+        uses: actions/download-artifact@v4
+        with:
+          name: schema-fingerprints
+          path: serve-root
+
+      - name: Assemble serve-root
+        run: |
+          # download-artifact creates gui-dist-{version}/ subdirs; rename to {version}/
+          cd serve-root
+          for dir in gui-dist-*; do
+            version="${dir#gui-dist-}"
+            mv "$dir" "$version"
+          done
+          echo "Assembled versions:"
+          ls -1
+
+      - name: Run smoke tests
+        id: tested
+        run: |
+          bun scripts/serve.ts --dir serve-root --port 8765 &
+          SERVE_PID=$!
+          timeout 10 bash -c 'until curl -sf http://localhost:8765/ > /dev/null 2>&1; do sleep 1; done' || true
+
+          passed=()
+          failed=()
+          for version in $(ls serve-root | grep -v schema-fingerprints); do
+            echo "--- Testing $version ---"
+            if TEST_VERSION="$version" SERVE_PORT=8765 bunx playwright test 2>&1; then
+              passed+=("$version")
+            else
+              failed+=("$version")
+              echo "FAILED: $version"
+            fi
+          done
+
+          kill $SERVE_PID 2>/dev/null || true
+
+          echo "Passed: ${passed[*]}"
+          echo "Failed: ${failed[*]}"
+
+          # Output as JSON array
+          versions=$(printf '%s\n' "${passed[@]}" | jq -R . | jq -s .)
+          echo "versions=$versions" >> "$GITHUB_OUTPUT"
+
+  # Deploy tested versions to S3 and update the index page.
+  deploy:
+    needs: [discover, test, fingerprints]
+    if: always() && needs.test.result != 'cancelled'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout deployment repo
+        uses: actions/checkout@v6
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -243,9 +270,6 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: '22'
-
-      - name: Install flatbuffers
-        run: sudo apt-get install -y flatbuffers-compiler
 
       - name: Install dependencies
         run: bun install
@@ -256,18 +280,31 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
 
-      # --- Collect successful builds ---
-      # Each successful build job uploads an artifact named build-result-{version}.
-      # List matching artifacts to discover which versions succeeded.
-      - name: Identify built versions
-        id: built
+      # --- Upload tested GUI dists to S3 ---
+      - name: Download tested GUI dists
+        uses: actions/download-artifact@v4
+        with:
+          pattern: gui-dist-*
+          path: gui-dists
+
+      - name: Upload to S3
         env:
-          GH_TOKEN: ${{ github.token }}
+          S3_BUCKET: ${{ vars.TF_VAR_S3_BUCKET_NAME }}
         run: |
-          versions=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" \
-            --jq '[.artifacts[].name | select(startswith("build-result-")) | ltrimstr("build-result-")]')
-          echo "versions=$versions" >> "$GITHUB_OUTPUT"
-          echo "Built versions: $versions"
+          succeeded='${{ needs.test.outputs.versions }}'
+          for version in $(echo "$succeeded" | jq -r '.[]'); do
+            dist="gui-dists/gui-dist-${version}"
+            [ -d "$dist" ] || continue
+
+            aws s3 sync "$dist/assets/" "s3://$S3_BUCKET/$version/assets/" \
+              --cache-control "public, max-age=31536000, immutable"
+
+            aws s3 sync "$dist/" "s3://$S3_BUCKET/$version/" \
+              --exclude "assets/*" \
+              --cache-control "public, max-age=86400"
+
+            echo "Uploaded $version"
+          done
 
       # --- Update versions.json (once, no race) ---
       - name: Update versions.json
@@ -282,7 +319,7 @@ jobs:
           fi
 
           attempted='${{ needs.discover.outputs.versions }}'
-          succeeded='${{ steps.built.outputs.versions }}'
+          succeeded='${{ needs.test.outputs.versions }}'
 
           # Record successful builds
           for version in $(echo "$succeeded" | jq -r '.[]'); do
@@ -307,26 +344,20 @@ jobs:
           aws s3 cp versions.json "s3://$S3_BUCKET/versions.json" \
             --cache-control "no-cache"
 
-      # --- Update schema fingerprints (once, no race) ---
-      - name: Update schema fingerprints
+      # --- Upload schema fingerprints (generated by fingerprints job) ---
+      - name: Download fingerprints
+        uses: actions/download-artifact@v4
+        with:
+          name: schema-fingerprints
+
+      - name: Upload fingerprints to S3
         env:
           S3_BUCKET: ${{ vars.TF_VAR_S3_BUCKET_NAME }}
         run: |
-          bun scripts/explore-protocol.ts \
-            --server-repo SlimeVR-Server \
-            --output protocol-exploration.json
-
-          bun scripts/extract-schema-fingerprints.ts \
-            --input protocol-exploration.json \
-            --output schema-fingerprints.json
-
           aws s3 cp schema-fingerprints.json "s3://$S3_BUCKET/schema-fingerprints.json" \
             --cache-control "no-cache"
 
       # --- Build index page ---
-      # versions.json and schema-fingerprints.json are already local from
-      # the update steps above. Fetch from S3 only if missing (e.g. no
-      # versions were built so the update step was skipped).
       - name: Ensure data files exist
         env:
           S3_BUCKET: ${{ vars.TF_VAR_S3_BUCKET_NAME }}
