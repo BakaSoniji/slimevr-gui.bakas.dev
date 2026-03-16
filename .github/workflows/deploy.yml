@@ -168,23 +168,36 @@ jobs:
         working-directory: deploy-repo
         run: bun scripts/patch-for-deploy.ts --gui-root ../SlimeVR-Server/gui --base-path "/${{ matrix.version }}/"
 
+      - name: Detect build flavor
+        id: flavor
+        working-directory: deploy-repo
+        run: |
+          flavor=$(bun scripts/detect-build-flavor.ts --gui-root ../SlimeVR-Server/gui --json)
+          echo "pkg=$(echo "$flavor" | jq -r .packageManager)" >> "$GITHUB_OUTPUT"
+          echo "build=$(echo "$flavor" | jq -r .buildTool)" >> "$GITHUB_OUTPUT"
+
       - name: Install dependencies
         working-directory: SlimeVR-Server
-        run: pnpm install --frozen-lockfile || pnpm install
+        run: |
+          if [ "${{ steps.flavor.outputs.pkg }}" = "pnpm" ]; then
+            pnpm install --frozen-lockfile || pnpm install
+          else
+            npm install
+          fi
 
       - name: Build solarxr-protocol
         working-directory: SlimeVR-Server
-        run: pnpm run update-solarxr
+        run: ${{ steps.flavor.outputs.pkg }} run update-solarxr || true
 
       - name: Build GUI
         working-directory: SlimeVR-Server/gui
         env:
           BASE_PATH: /${{ matrix.version }}/
         run: |
-          if [ -f electron.vite.config.ts ]; then
+          if [ "${{ steps.flavor.outputs.build }}" = "electron-vite" ]; then
             npx vite build
           else
-            pnpm run build
+            ${{ steps.flavor.outputs.pkg }} run build
           fi
 
       - name: Verify paths
