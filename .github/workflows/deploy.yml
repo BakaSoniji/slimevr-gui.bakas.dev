@@ -91,9 +91,11 @@ jobs:
         uses: oven-sh/setup-bun@v2
 
       - name: Install flatbuffers
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          curl -LO https://github.com/google/flatbuffers/releases/latest/download/Linux.flatc.binary.clang++-17.zip
-          unzip -o Linux.flatc.binary.clang++-17.zip -d /usr/local/bin
+          gh release download --repo google/flatbuffers --pattern 'Linux.flatc.binary.*.zip' --dir /tmp/flatc
+          unzip -o /tmp/flatc/*.zip -d /usr/local/bin
           chmod +x /usr/local/bin/flatc
           flatc --version
 
