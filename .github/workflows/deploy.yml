@@ -118,9 +118,6 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-
       - name: Install Playwright
         working-directory: deploy-repo
         run: bun install && bunx playwright install --with-deps chromium
@@ -153,10 +150,16 @@ jobs:
         working-directory: deploy-repo
         run: bun scripts/verify-paths.ts ../SlimeVR-Server/gui/dist "/${{ matrix.version }}/"
 
-      # --- Build server ---
-      - name: Build SlimeVR server
-        working-directory: SlimeVR-Server
-        run: ./gradlew shadowJar
+      # --- Download server JAR from release ---
+      - name: Download server JAR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ matrix.version }}
+        run: |
+          gh release download "v${VERSION}" \
+            --repo ${{ env.SLIMEVR_REPO }} \
+            --pattern "slimevr.jar" \
+            --dir .
 
       - name: Run smoke tests
         id: smoke
@@ -166,8 +169,9 @@ jobs:
         run: |
           mkdir -p serve-root
           ln -s "$(pwd)/SlimeVR-Server/gui/dist" "serve-root/${{ matrix.version }}"
+          echo '{"probes":[],"versions":{}}' > serve-root/schema-fingerprints.json
 
-          java -jar SlimeVR-Server/server/build/libs/slimevr*.jar &
+          java -jar slimevr.jar &
           SERVER_PID=$!
 
           cd deploy-repo
