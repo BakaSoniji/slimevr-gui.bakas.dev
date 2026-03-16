@@ -17,9 +17,17 @@ function readJson<T>(filename: string, fallback: T): T {
 const versions: VersionEntry[] = readJson<VersionEntry[]>("versions.json", []);
 
 // Sort by semver descending (newest first)
-versions.sort((a, b) =>
-    b.version.localeCompare(a.version, undefined, { numeric: true }),
-);
+function compareVersions(a: string, b: string): number {
+    const [aBase, aPre] = a.split("-", 2);
+    const [bBase, bPre] = b.split("-", 2);
+    const baseCmp = aBase!.localeCompare(bBase!, undefined, { numeric: true });
+    if (baseCmp !== 0) return baseCmp;
+    if (!aPre && bPre) return 1;   // no-pre > has-pre (release after rc)
+    if (aPre && !bPre) return -1;
+    if (!aPre && !bPre) return 0;
+    return aPre!.localeCompare(bPre!, undefined, { numeric: true });
+}
+versions.sort((a, b) => compareVersions(b.version, a.version));
 
 // Read version notes from content collection
 const notes = await getCollection("versionNotes");
