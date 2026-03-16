@@ -87,6 +87,14 @@ jobs:
           submodules: recursive
           path: SlimeVR-Server
 
+      # explore-protocol.ts needs full submodule history to git-archive
+      # historical commits; actions/checkout only fetches the HEAD commit
+      - name: Fetch full submodule history
+        run: |
+          cd SlimeVR-Server/solarxr-protocol
+          git fetch --unshallow 2>/dev/null || true
+          git fetch origin
+
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
 
