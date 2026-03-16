@@ -14,6 +14,11 @@ on:
         required: false
         type: boolean
         default: false
+      retry-failed:
+        description: 'Retry previously failed versions'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   id-token: write
@@ -21,7 +26,7 @@ permissions:
 
 env:
   SLIMEVR_REPO: SlimeVR/SlimeVR-Server
-  MIN_VERSION: '0.13.0'
+  MIN_VERSION: '0.5.0'
 
 jobs:
   discover:
@@ -70,7 +75,8 @@ jobs:
             --releases all_releases.txt \
             --min-version "${{ env.MIN_VERSION }}" \
             ${{ inputs.version && format('--override {0}', inputs.version) || '' }} \
-            ${{ inputs.include-prereleases && '--include-prereleases' || '' }}
+            ${{ inputs.include-prereleases && '--include-prereleases' || '' }} \
+            ${{ inputs.retry-failed && '--retry-failed' || '' }}
 
   # Generate schema fingerprints from git history (parallel with builds).
   fingerprints:

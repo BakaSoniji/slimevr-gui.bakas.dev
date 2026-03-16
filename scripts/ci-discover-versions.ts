@@ -20,6 +20,7 @@ const { values } = parseArgs({
     "min-version": { type: "string" },
     override: { type: "string" },
     "include-prereleases": { type: "boolean", default: false },
+    "retry-failed": { type: "boolean", default: false },
   },
   strict: true,
 });
@@ -39,6 +40,7 @@ if (!values.deployed || !values.releases || !values["min-version"]) {
 
 const minVersion = values["min-version"];
 const includePrereleases = values["include-prereleases"];
+const retryFailed = values["retry-failed"];
 
 import type { VersionEntry } from "../src/lib/types";
 
@@ -55,7 +57,8 @@ const allReleases = (await Bun.file(values.releases).text())
 // Filter: >= min-version and not already deployed
 const toBuild = allReleases.filter((v) => {
   try {
-    if (deployed.has(v) || failed.has(v)) return false;
+    if (deployed.has(v)) return false;
+    if (failed.has(v) && !retryFailed) return false;
 
     const isPrerelease = v.includes("-");
     if (isPrerelease && !includePrereleases) return false;
