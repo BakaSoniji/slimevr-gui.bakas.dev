@@ -214,7 +214,7 @@ jobs:
   # Run smoke tests against all built versions at once.
   test:
     needs: [discover, build, fingerprints]
-    if: always() && needs.build.result != 'cancelled'
+    if: always() && needs.build.result == 'success'
     runs-on: ubuntu-latest
     outputs:
       versions: ${{ steps.tested.outputs.versions }}
