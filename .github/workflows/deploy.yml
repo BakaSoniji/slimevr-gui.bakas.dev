@@ -89,12 +89,13 @@ jobs:
 
       # explore-protocol.ts needs full submodule history to git-archive
       # historical commits; actions/checkout only fetches the HEAD commit
+      # explore-protocol.ts needs all historical submodule commits.
+      # actions/checkout only fetches HEAD; fetch all branches + tags.
       - name: Fetch full submodule history
         run: |
           cd SlimeVR-Server/solarxr-protocol
-          git remote -v
           git fetch --unshallow 2>/dev/null || true
-          git fetch origin --tags
+          git fetch origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'
           echo "Total commits: $(git rev-list --all --count)"
 
       - name: Setup Bun
