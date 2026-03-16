@@ -91,7 +91,11 @@ jobs:
         uses: oven-sh/setup-bun@v2
 
       - name: Install flatbuffers
-        run: sudo apt-get install -y flatbuffers-compiler
+        run: |
+          curl -LO https://github.com/google/flatbuffers/releases/latest/download/Linux.flatc.binary.clang++-17.zip
+          unzip -o Linux.flatc.binary.clang++-17.zip -d /usr/local/bin
+          chmod +x /usr/local/bin/flatc
+          flatc --version
 
       - name: Generate fingerprints
         run: |
