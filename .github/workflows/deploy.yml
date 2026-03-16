@@ -92,8 +92,10 @@ jobs:
       - name: Fetch full submodule history
         run: |
           cd SlimeVR-Server/solarxr-protocol
+          git remote -v
           git fetch --unshallow 2>/dev/null || true
-          git fetch origin
+          git fetch origin --tags
+          echo "Total commits: $(git rev-list --all --count)"
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
