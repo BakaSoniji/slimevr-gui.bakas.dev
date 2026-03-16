@@ -257,7 +257,7 @@ jobs:
           echo "Failed: ${failed[*]}"
 
           # Output as JSON array
-          versions=$(printf '%s\n' "${passed[@]}" | jq -R . | jq -s .)
+          versions=$(printf '%s\n' "${passed[@]}" | jq -R . | jq -sc .)
           echo "versions=$versions" >> "$GITHUB_OUTPUT"
 
   # Deploy tested versions to S3 and update the index page.
